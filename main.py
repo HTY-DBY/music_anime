@@ -1,11 +1,14 @@
+# %%
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image, ImageSequence
+from PIL import Image, ImageSequence, ImageOps
 from matplotlib import rcParams
 from moviepy import VideoClip, AudioFileClip
 from pydub import AudioSegment
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from scipy.ndimage import gaussian_filter1d
+
 from Other.Goble import GobleD
 from Other.Other_main import init_ffmpeg_IN_Other_main
 
@@ -13,18 +16,16 @@ from Other.Other_main import init_ffmpeg_IN_Other_main
 init_ffmpeg_IN_Other_main(GobleD().ffmpeg_ins_path)
 
 # 配置参数
-frame_set = 30  # 每秒的帧数
-n_seconds = 5  # 设置窗口的持续时间，比如最近5秒的数据
-x_offset = 0.5  # 调整x轴偏移量，单位为秒
-roit = [0.09, 0.14]
-y_offset = -700  # 调整y轴像素偏移量
-audio_path = os.path.join(GobleD().music_down_path, 'kanong.flac')  # 输入音频文件路径
-output_video_path = os.path.join(GobleD().music_down_path, 'output.mp4')  # 输出视频路径
-person_image_path = GobleD().person_img_path  # 图片或GIF的路径
+frame_set = 24  # 每秒的帧数
+n_seconds = 4  # 设置窗口的持续时间，比如最近5秒的数据
+x_offset = 0  # 调整x轴偏移量，单位为秒
+roit = [0.10, 0.15]
+smooth_ok = 1
+sampling_interval = 0.04  # 设置采样间隔，单位为秒（例如每0.1秒取一次样本）
 
-# 配置字体以支持中文显示
-rcParams['font.sans-serif'] = ['SimHei']  # 使用中文黑体字体
-rcParams['axes.unicode_minus'] = False  # 解决负号显示为方块的问题
+audio_path = os.path.join(GobleD().music_down_path, 'blessing.flac')  # 输入音频文件路径
+output_video_path = os.path.join(GobleD().music_down_path, 'output3.mp4')  # 输出视频路径
+person_image_path = GobleD().person_img_path  # 图片或GIF的路径
 
 # 加载音频文件
 audio = AudioSegment.from_file(audio_path)
@@ -43,8 +44,9 @@ def calculate_all_rms():
 	global begin_cal_rms  # 使用全局变量
 	x_data_all, y_data_all = [], []
 
-	for start_ms in range(0, duration_ms, 1000 // frame_set):
-		end_ms = min(start_ms + (1000 // frame_set), duration_ms)
+	# 使用自定义的采样间隔进行采样
+	for start_ms in np.arange(0, duration_ms, sampling_interval * 1000):  # 将采样间隔转换为毫秒
+		end_ms = min(start_ms + (sampling_interval * 1000), duration_ms)  # 每次采样的结束时间
 		audio_frame = audio[start_ms:end_ms]
 		samples = np.array(audio_frame.get_array_of_samples())
 
@@ -62,7 +64,8 @@ def calculate_all_rms():
 		if np.isnan(rms_value) or np.isinf(rms_value):
 			continue
 
-		x_data_all.append(start_ms / 1000)  # 转换为秒
+		# 将时间转换为秒
+		x_data_all.append(start_ms / 1000)
 		y_data_all.append(rms_value)
 
 	return np.array(x_data_all), np.array(y_data_all)
@@ -72,7 +75,7 @@ def calculate_all_rms():
 def calculate_rms(samples):
 	try:
 		# 检查是否有无效值
-		if np.any(np.isnan(samples)) or np.any(np.isinf(samples)):
+		if np.any(np.isnan(samples)) or np.any(np.isinf(samples)) or np.sum(samples) < 0:
 			return 0.1  # 使用默认值，避免计算出无效值
 		# 计算RMS，返回均方根值
 		rms_value = np.sqrt(np.mean(samples ** 2))
@@ -82,25 +85,32 @@ def calculate_rms(samples):
 		return 0.1  # 默认值
 
 
+def smooth_curve_gaussian(data, sigma=2):
+	""" 使用高斯平滑曲线 """
+	return gaussian_filter1d(data, sigma=sigma)
+
+
 # 获取响度数据
 x_data_all, y_data_all = calculate_all_rms()
+if smooth_ok == 1:
+	y_data_all = smooth_curve_gaussian(y_data_all, sigma=2)
 
 # 计算最大RMS值，并确保它是有效的
 max_rms = np.max(y_data_all) if len(y_data_all) > 0 else 0.1
 if np.isnan(max_rms) or np.isinf(max_rms):
 	max_rms = 0.1
 else:
-	max_rms *= 1.1  # 增加最大RMS值的范围
+	max_rms *= 1  # 增加最大RMS值的范围
 
 # 创建图形
 fig, ax = plt.subplots(figsize=(19.2, 10.8), dpi=150)
-
+plt.tight_layout()
 # 初始化line并连接到ax
 line, = ax.plot(x_data_all, y_data_all, lw=2)
 
-ax.set_ylim(y_offset, max_rms)
-ax.set_xlabel("时间 (秒)")  # x轴标签
-ax.set_ylabel("响度 (RMS)")  # y轴标签
+temp = max_rms * roit[1] * 0.9
+ax.set_ylim(-temp, max_rms + temp)
+# ax.set_xlabel("时间 (秒)")  # x轴标签
 
 # 加载小人图像（支持JPG, PNG, GIF）
 person_image = Image.open(person_image_path)
@@ -162,8 +172,20 @@ def render_ani_to_image(frame):
 	update(frame)
 	canvas = FigureCanvas(fig)
 	canvas.draw()
+
+	# 获取 RGBA 图像（包括透明度）
 	image = np.array(canvas.buffer_rgba())[..., :3]  # 将 RGBA 转为 RGB
-	return image
+
+	# 将其转为 PIL 图像对象
+	pil_image = Image.fromarray(image)
+
+	# 使用 PIL 的 ImageOps 来自动裁剪白边
+	bbox = pil_image.convert('L').point(lambda x: 255 if x > 240 else 0).getbbox()  # 获取白边的边界框
+	if bbox:
+		pil_image = pil_image.crop(bbox)  # 裁剪图像
+
+	# 转换回 numpy 数组并返回
+	return np.array(pil_image)
 
 
 # 获取音频时长
@@ -182,6 +204,7 @@ video_clip = VideoClip(make_frame, duration=duration)
 
 # 添加音频到视频中
 video_clip = video_clip.with_audio(audio_clip)
-
+# %%
 # 输出为 MP4 文件
+# video_clip = video_clip.resized(height=720)  # 调整分辨率
 video_clip.write_videofile(output_video_path, codec="libx264", fps=frame_set, threads=os.cpu_count(), bitrate="5000k")
